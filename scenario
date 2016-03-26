@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+const RULE_PARENT_ISSUE = /^[^#\n]+#(\d+)/,
+	  RULE_TEST 		= /````(?:gherkin)?([^`]+)````/,
+	  RULE_FEATURE_NAME = /Feature\:\s*([^\n\r]+)/,
+	  RULE_STEP_DEF 	= /((W|T)hen|And|Given|But) ([^\n\r]+)/g,
+
+	  RULE_VAR 			= /<([^>]+)>/g,
+
+	  TEST_PATH 		= '/web/tests/cucumber/features/',
+	  STEP_FILE			= 'module.exports = function() {\n\r\t\n\r});';
+
+var exec 		= require('child_process').exec,
+	fs 			= require('fs'),
+	shell 		= require('shelljs'),
+	args 		= process.argv.slice(2),
+	path 		= process.cwd() + '/',
+	test_dir 	= args[1],
+	issueNr 	= parseInt(args[0]),
+	git_user 	= shell.exec('git config github.user').stdout,
+	git_token 	= shell.exec('git config github.token').stdout;
+
+require('shelljs/global');
+
+function sanitize(str) {
+	return str.toLowerCase().replace('feature: ','').replace(/[^a-z]+/g, '-');
+}
+
+function _getIssue(nr) {
+	return 'curl -u ' + git_user + ':' + git_token + ' "https://api.github.com/repos/workflow/dropz/issues/' + nr + '"';
+}
+
+function _getStepDef(cmd, reg, vars) {
+	if(reg.indexOf('(\\d+)') > -1) {
+		vars = '<count>';
+	}
+	return '\tthis.' + cmd + '(/^' + reg.replace(/^\s+|\s+$/, '') + '$/, function(' + (vars && vars.slice(1,-1) || '') + ') {\n\t\t\n\t});'
+}
+
+console.success = function(msg) {	console.log('\033[0;32m', msg, '\033[0m');				}
+console.error 	= function(msg) {	console.log('\033[0;31m', msg, '\033[0m');	exit(1); 	}
+
+if( !env.DROPZ_WORKFLOW_SCENARIO ) {
+	fs.appendFile(env.HOME + '/.config/fish/config.fish', '\n\nset PATH ' + path + ' $PATH\nset -gx DROPZ_WORKFLOW_SCENARIO 1\n', function(error) {
+		if(error) {
+			console.error(error);
+		} else {
+			console.success('Script installed.');
+			console.log('Restart console to use!');
+			exit(0);
+		}
+	});
+} else if( !path.match(/\/dropz\/?$/) ) {
+	console.error('You are not in the main dropz directory!');
+}
+
+if(!git_user.length) {
+	console.error("Could not find username, run 'git config --global github.user <username>'");
+}
+if(!git_token.length) {
+	console.error("Could not find token, run 'git config --global github.token <token of appreciation>'");
+}
+
+var issue = JSON.parse( shell.exec(_getIssue(issueNr)).stdout ),
+	parent 	= issue.body.match( RULE_PARENT_ISSUE ),
+
+	sane_title, 
+	branch;
+
+console.log('Retrieving data of issue #' + parent[1] + '…');
+
+parent = JSON.parse(exec(_getIssue(parent[1]).stdout);
+sane_title = sanitize(parent.title);
+branch = sane_title + '-F-' + parent.number;
+
+console.log('This issue is parent of "' + parent.title + '"');
+console.log('Switching to branch', branch + '…');
+
+shell.exec('git branch ' + branch + '; git checkout ' + branch);
+
+var test 	= parent.body.match( RULE_TEST )[1],
+	title 	= test.match( RULE_FEATURE_NAME )[1],
+	fpath 	= path + TEST_PATH + test_dir + '/',
+	feature = fpath + sanitize(title) + '.feature',
+	steps 	= fpath + 'step_definitions/' + sanitize(title) + '.js';
+
+console.log('Creating folder structure…');
+
+fs.mkdir(fpath + 'step_definitions', function(error){});
+
+fs.access(feature, fs.F_OK | fs.W_OK, function(error) {
+	if(error) {
+		console.log('Creating feature file:', sanitize(title) + '.feature');
+		console.log('Creating feature file:', 'step_definitions/' + sanitize(title) + '.js');
+		fs.appendFileSync( feature, test );
+		fs.appendFileSync( steps, 	STEP_FILE );
+	}
+
+	var rules = issue.body.match(RULE_TEST)[1],
+		step_defs = [];
+
+	console.log('Adding scenario (', issue.title.replace('Scenario: ','') ,') to feature file…');
+	fs.appendFileSync( feature, "\n\r\t" + issue.title );
+	fs.appendFileSync( feature, rules.replace(/\n/g, "\n\t") );
+
+	rules = rules.match( RULE_STEP_DEF );
+
+	fs.readFile( steps, function(error, data) {
+		// remove closing brackets for insertion of moar
+		data = data.toString('utf8').replace(/\s*\}\s*\)\s*\;\s*$/, '') + '\n';	
+
+		rules.forEach(function(val) {
+			var cmd = val.split(' ')[0],
+				reg = val.split(' '),
+				vars;
+
+			reg.shift();
+			reg = reg.join(' ');
+			vars = reg.match( RULE_VAR ) || [];
+			reg = reg
+					.replace(/(\d+)/g, '(\\d+)') 			// replace numbers by regex \d
+					.replace( vars[0], '(.+)' ) + '\n'; 	// and variable names by regex .*
+
+			step_defs.push( _getStepDef(cmd, reg, vars[0]) );
+		});
+
+		console.log('Adding implementation for step definition…');
+		fs.writeFileSync( steps, data + step_defs.join('\n') + '\n});' );
+
+		console.log('Committing step…');
+		shell.exec('git add .; git checkout -m "Adding scenario #' + issueNr + ' to #' + parent.number + '"');
+		
+		console.success('All done.');
+		exit(0);
+	});
+});
